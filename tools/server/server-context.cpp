@@ -876,11 +876,11 @@ private:
         SRV_INF("loading model '%s'\n", params.model.path.c_str());
 
         params_base = params;
-        // respect an explicit --n-outputs-max (needed to score many prompt positions
-        // at once, e.g. prompt_logprobs); otherwise size it for the slot count.
-        if (params_base.n_outputs_max == 0) {
-            params_base.n_outputs_max = server_n_outputs_max(params_base);
-        }
+        // server_n_outputs_max() is the floor the slots need; --n-outputs-max may only raise it
+        // (e.g. to score many prompt positions at once for prompt_logprobs). Take the max so we
+        // never depend on the upstream default of n_outputs_max as a "was it set" sentinel.
+        params_base.n_outputs_max =
+            std::max<int32_t>(params_base.n_outputs_max, (int32_t) server_n_outputs_max(params_base));
 
         std::string & mmproj_path = params_base.mmproj.path;
         bool has_mmproj = !mmproj_path.empty();

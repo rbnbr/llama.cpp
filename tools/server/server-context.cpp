@@ -107,6 +107,10 @@ struct server_slot {
 
     std::vector<completion_token_output> generated_token_probs;
 
+    // per-prompt-position logprobs (teacher-forced scoring), populated when
+    // task->params.n_prompt_probs > 0; null/empty otherwise
+    json prompt_logprobs;
+
     bool has_next_token = true;
     bool has_new_line   = false;
     bool truncated      = false;
@@ -221,6 +225,7 @@ struct server_slot {
         }
         generated_tokens.clear();
         generated_token_probs.clear();
+        prompt_logprobs = json();
         json_schema = json();
 
         // clear speculative decoding stats
@@ -871,7 +876,11 @@ private:
         SRV_INF("loading model '%s'\n", params.model.path.c_str());
 
         params_base = params;
-        params_base.n_outputs_max = server_n_outputs_max(params_base);
+        // respect an explicit --n-outputs-max (needed to score many prompt positions
+        // at once, e.g. prompt_logprobs); otherwise size it for the slot count.
+        if (params_base.n_outputs_max == 0) {
+            params_base.n_outputs_max = server_n_outputs_max(params_base);
+        }
 
         std::string & mmproj_path = params_base.mmproj.path;
         bool has_mmproj = !mmproj_path.empty();
@@ -1981,6 +1990,8 @@ private:
             }
         }
 
+        res->prompt_logprobs = std::move(slot.prompt_logprobs);
+
         res->generation_params = slot.task->params; // copy the parameters
 
         queue_results.send(std::move(res));
@@ -2029,6 +2040,56 @@ private:
         SLT_DBG(slot, "%s", "sending embeddings\n");
 
         queue_results.send(std::move(res));
+    }
+
+    // Teacher-forced scoring: for each prompt position decoded in this batch, record
+    // the top-N tokens and the logprob the model assigns to the *actual* next prompt
+    // token. The result is aligned to prompt positions: prompt_logprobs[k] describes
+    // token k (predicted from the logits at position k-1); index 0 is always null
+    // (nothing precedes the first token). Positions not decoded in this batch stay
+    // null, so callers needing the whole prompt should send cache_prompt=false and
+    // keep the prompt within one batch (n_batch).
+    void collect_prompt_probs(server_slot & slot, const llama_batch & batch) {
+        const int    n_prompt = slot.task->n_tokens();
+        const size_t n_top    = (size_t) slot.task->params.n_prompt_probs;
+
+        if (!slot.prompt_logprobs.is_array()) {
+            slot.prompt_logprobs = json::array();
+            for (int k = 0; k < n_prompt; ++k) {
+                slot.prompt_logprobs.push_back(nullptr);
+            }
+        }
+
+        for (int i = 0; i < batch.n_tokens; ++i) {
+            if (!batch.logits[i] || batch.seq_id[i][0] != slot.id) {
+                continue;
+            }
+
+            // logits at this position predict the token at pos + 1
+            const int next = batch.pos[i] + 1;
+            if (next <= 0 || next >= n_prompt) {
+                continue; // token 0 has no preceding context; the last position predicts a generated token
+            }
+            const llama_token next_tok = slot.task->tokens[next];
+
+            std::vector<llama_token_data> cur = get_token_probabilities(slot.ctx_tgt, i, n_top);
+
+            completion_token_output p;
+            p.tok          = next_tok;
+            p.text_to_send = common_token_to_piece(slot.ctx_tgt, next_tok, params_base.special);
+            p.prob         = 0.0f; // the actual token is always present in the full distribution
+            for (const auto & t : cur) {
+                if (t.id == next_tok) { p.prob = t.p; break; }
+            }
+
+            const size_t n = std::min(n_top, cur.size());
+            p.probs.reserve(n);
+            for (size_t j = 0; j < n; ++j) {
+                p.probs.push_back({ cur[j].id, common_token_to_piece(slot.ctx_tgt, cur[j].id, params_base.special), cur[j].p });
+            }
+
+            slot.prompt_logprobs[next] = completion_token_output::probs_vector_to_json({ p }, false)[0];
+        }
     }
 
     void send_rerank(const server_slot & slot, const llama_batch & batch) {
@@ -3155,7 +3216,7 @@ private:
                             cur_tok,
                             slot.prompt.tokens.pos_next(),
                             { slot.id },
-                            slot.need_embd());
+                            slot.need_embd() || slot.task->params.n_prompt_probs > 0);
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
@@ -3414,6 +3475,13 @@ private:
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_DONE_PROMPT) {
                     if (slot.task->params.stream && slot.task->params.return_progress) {
                         send_partial_response(slot, {}, true);
+                    }
+                    // teacher-forced scoring: collect prompt-position logprobs from this
+                    // batch. The prompt may be split across several decode passes (e.g.
+                    // checkpointing), so accumulate here per pass — the collector indexes
+                    // by position, so partial passes compose into the full result.
+                    if (slot.task->params.n_prompt_probs > 0) {
+                        collect_prompt_probs(slot, batch_view);
                     }
                 }
 

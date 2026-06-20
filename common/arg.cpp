@@ -1301,6 +1301,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_UBATCH"));
     add_opt(common_arg(
+        {"--n-outputs-max"}, "N",
+        "max number of output rows (logits/embeddings) per batch (default: 0 = auto). "
+        "Raise to request logits at many positions in one batch, e.g. prompt_logprobs scoring",
+        [](common_params & params, int value) {
+            params.n_outputs_max = value;
+        }
+    ).set_env("LLAMA_ARG_N_OUTPUTS_MAX"));
+    add_opt(common_arg(
         {"--keep"}, "N",
         string_format("number of tokens to keep from the initial prompt (default: %d, -1 = all)", params.n_keep),
         [](common_params & params, int value) {

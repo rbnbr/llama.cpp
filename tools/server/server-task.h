@@ -76,6 +76,11 @@ struct task_params {
     bool timings_per_token   = false;
     bool post_sampling_probs = false;
 
+    // if > 0, return per-prompt-position logprobs: for each prompt position the
+    // top-N tokens plus the logprob the model assigns to the actual next prompt
+    // token (teacher-forced scoring; cf. OpenAI echo+logprobs / vLLM prompt_logprobs)
+    int32_t n_prompt_probs = 0;
+
     struct common_params_sampling sampling;
     struct common_params_speculative speculative;
 
@@ -354,6 +359,7 @@ struct server_task_result_cmpl_final : server_task_result {
 
     bool post_sampling_probs;
     std::vector<completion_token_output> probs_output;
+    json prompt_logprobs; // per-prompt-position logprobs when n_prompt_probs > 0 (null otherwise)
     std::vector<std::string>  response_fields;
 
     task_params generation_params;

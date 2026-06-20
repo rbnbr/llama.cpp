@@ -173,6 +173,9 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
         ->add_alias("logprobs") // use "logprobs" if "n_probs" wasn't provided
         ->set_desc("If greater than 0, output the probabilities of top N tokens for each generated token"));
 
+    add((new field_num("prompt_logprobs", params.n_prompt_probs))
+        ->set_desc("If greater than 0, return per-prompt-position logprobs (top N + the actual next token) for teacher-forced scoring"));
+
     add((new field_num("min_keep", params.sampling.min_keep))
         ->set_hard_limits(0, INT32_MAX)
         ->set_desc("If greater than 0, force samplers to return at least N possible tokens"));

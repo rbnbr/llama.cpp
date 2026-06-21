@@ -2047,8 +2047,10 @@ private:
     // token. The result is aligned to prompt positions: prompt_logprobs[k] describes
     // token k (predicted from the logits at position k-1); index 0 is always null
     // (nothing precedes the first token). Positions not decoded in this batch stay
-    // null, so callers needing the whole prompt should send cache_prompt=false and
-    // keep the prompt within one batch (n_batch).
+    // null and are filled by later passes: the prompt is scored in windows of
+    // n_outputs_max rows (see the fill loop in update_slots), so this composes the
+    // whole prompt across passes. Callers needing every position should send
+    // cache_prompt=false. Any prompt length works, bounded only by context.
     void collect_prompt_probs(server_slot & slot, const llama_batch & batch) {
         const int    n_prompt = slot.task->n_tokens();
         const size_t n_top    = (size_t) slot.task->params.n_prompt_probs;
@@ -3193,6 +3195,29 @@ private:
                     const int32_t n_before_user = slot.task->params.n_before_user;
                     const bool n_before_user_known = n_before_user > 0;
 
+                    // teacher-forced scoring requests per-prompt-position logits. We need
+                    // them only from prompt_logprobs_from onward: the entry at position k is
+                    // predicted from the logits at position k-1, so to produce entries k >= F
+                    // we flag logits at positions >= F-1. F=0 (default) flags every position
+                    // (the original behaviour). A caller scoring only the delivered tail (the
+                    // audit) sets F to the prompt length, so the LM head runs over the tail,
+                    // not the whole prompt.
+                    //
+                    // Those logit rows live in a buffer of params_base.n_outputs_max rows, so
+                    // cap the flagged tokens per decode at that buffer and resume the rest next
+                    // pass (collect_prompt_probs accumulates each window by position). This makes
+                    // any length scoreable, bounded only by context, without overflowing the
+                    // buffer. Count flagged rows already in the shared batch (e.g. other slots'
+                    // generation logits) since the buffer is batch-global.
+                    const bool scoring   = slot.task->params.n_prompt_probs > 0;
+                    const int  probs_from = slot.task->params.n_prompt_probs_from; // entries >= F
+                    int n_outputs_in_batch = 0;
+                    if (scoring) {
+                        for (int k = 0; k < batch.n_tokens; ++k) {
+                            n_outputs_in_batch += batch.logits[k] ? 1 : 0;
+                        }
+                    }
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.n_tokens < n_batch) {
                         // get next token to process
@@ -3209,15 +3234,26 @@ private:
                             break;
                         }
 
-                        // embedding requires all tokens in the batch to be output;
-                        // MTP also wants logits at every prompt position so the
-                        // streaming hook can mirror t_h_nextn into ctx_dft.
+                        // embedding requires all tokens in the batch to be output; scoring wants
+                        // logits at the positions that predict the entries it asked for.
+                        bool want_logits = slot.need_embd();
+                        if (scoring && (int) slot.prompt.n_tokens() + 1 >= probs_from) {
+                            // this position's logits are needed; stop if the buffer is full and
+                            // score the rest in the next pass(es).
+                            if (n_outputs_in_batch >= (int) params_base.n_outputs_max) {
+                                break;
+                            }
+                            want_logits = true;
+                        }
                         common_batch_add(batch,
                             cur_tok,
                             slot.prompt.tokens.pos_next(),
                             { slot.id },
-                            slot.need_embd() || slot.task->params.n_prompt_probs > 0);
+                            want_logits);
                         slot.prompt.tokens.push_back(cur_tok);
+                        if (scoring && want_logits) {
+                            n_outputs_in_batch++;
+                        }
 
                         slot.n_prompt_tokens_processed++;
 

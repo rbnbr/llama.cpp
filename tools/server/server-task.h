@@ -80,6 +80,10 @@ struct task_params {
     // top-N tokens plus the logprob the model assigns to the actual next prompt
     // token (teacher-forced scoring; cf. OpenAI echo+logprobs / vLLM prompt_logprobs)
     int32_t n_prompt_probs = 0;
+    // only return prompt_logprobs entries at positions >= this (0 = all). Lets a
+    // caller scoring just the delivered tail skip the LM head over the prompt body:
+    // the entry at position k needs logits at k-1, so positions >= F-1 are flagged.
+    int32_t n_prompt_probs_from = 0;
 
     struct common_params_sampling sampling;
     struct common_params_speculative speculative;

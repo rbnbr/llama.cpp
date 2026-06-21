@@ -1302,9 +1302,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_env("LLAMA_ARG_UBATCH"));
     add_opt(common_arg(
         {"--n-outputs-max"}, "N",
-        "max number of output rows (logits/embeddings) per batch (default: 0 = auto). "
-        "Only raises the value: it is clamped up to the minimum the server's slots require, "
-        "so use it to request logits at many positions in one batch, e.g. prompt_logprobs scoring",
+        "max output rows (logits) per decode; also the teacher-forced scoring window: "
+        "longer prompts are scored in windows of this many positions, each row costing "
+        "n_vocab logits. Only raises the value (clamped up to the generation floor the "
+        "server's slots require). Unset = generation floor; raise it to enable / speed up "
+        "prompt_logprobs scoring (default: 0 = auto)",
         [](common_params & params, int value) {
             params.n_outputs_max = value;
         }

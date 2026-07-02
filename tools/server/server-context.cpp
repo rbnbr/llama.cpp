@@ -2090,7 +2090,19 @@ private:
                 p.probs.push_back({ cur[j].id, common_token_to_piece(slot.ctx_tgt, cur[j].id, params_base.special), cur[j].p });
             }
 
-            slot.prompt_logprobs[next] = completion_token_output::probs_vector_to_json({ p }, false)[0];
+            json entry = completion_token_output::probs_vector_to_json({ p }, false)[0];
+
+            // Honest-likelihood inputs for the sampled-tier verdict (ADR-0075): the
+            // delivered token's honest sampling log-probability under the request's
+            // temperature/top_k/top_p, plus the step entropy and surprise varentropy —
+            // computed here from the full logits, so only three scalars leave the engine.
+            const auto & sp = slot.task->params.sampling;
+            honest_stats hs = compute_honest_stats(std::move(cur), next_tok, sp.temp, sp.top_k, sp.top_p);
+            entry["honest_logprob"]    = hs.logprob;
+            entry["honest_entropy"]    = hs.entropy;
+            entry["honest_varentropy"] = hs.varentropy;
+
+            slot.prompt_logprobs[next] = std::move(entry);
         }
     }
 

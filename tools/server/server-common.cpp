@@ -1291,6 +1291,54 @@ std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int i
     return cur;
 }
 
+honest_stats compute_honest_stats(std::vector<llama_token_data> cur,
+                                  llama_token delivered, float temp, int32_t top_k, float top_p) {
+    // The honest sampling distribution is softmax(logit / T) restricted to the
+    // top_k / top_p support (ADR-0075). `cur` carries every vocab entry's raw logit
+    // (get_token_probabilities returns the full distribution, top_n sorted at front).
+    const double T = temp > 0.0f ? (double) temp : 1e-6;
+    const bool trunc_k = top_k > 0 && (size_t) top_k < cur.size();
+    const bool trunc_p = top_p > 0.0f && top_p < 1.0f;
+    size_t support = cur.size();
+    if (trunc_k || trunc_p) {
+        // Truncation needs a full ordering by logit; the untruncated path (the
+        // OpenAI default top_p=1/top_k=0) skips the sort and scans the whole vocab.
+        std::sort(cur.begin(), cur.end(),
+                  [](const llama_token_data & a, const llama_token_data & b) { return a.logit > b.logit; });
+        if (trunc_k) {
+            support = (size_t) top_k;
+        }
+        if (trunc_p) {
+            const double maxl = (double) cur[0].logit / T;
+            double Z = 0.0;
+            for (size_t j = 0; j < support; j++) Z += std::exp((double) cur[j].logit / T - maxl);
+            double cum = 0.0; size_t np = support;
+            for (size_t j = 0; j < support; j++) {
+                cum += std::exp((double) cur[j].logit / T - maxl) / Z;
+                if (cum >= (double) top_p) { np = j + 1; break; }
+            }
+            support = np;
+        }
+    }
+    // Tempered log-normalizer over the support (max-shifted for stability).
+    double maxl = -std::numeric_limits<double>::infinity();
+    for (size_t j = 0; j < support; j++) maxl = std::max(maxl, (double) cur[j].logit / T);
+    double Z = 0.0;
+    for (size_t j = 0; j < support; j++) Z += std::exp((double) cur[j].logit / T - maxl);
+    const double logZ = std::log(Z) + maxl;
+    // Entropy + varentropy of the surprise (-log q) over the honest distribution,
+    // and log q of the delivered token (HONEST_OUTSIDE_SUPPORT if it was truncated).
+    double H = 0.0, sq = 0.0, dlq = HONEST_OUTSIDE_SUPPORT;
+    for (size_t j = 0; j < support; j++) {
+        const double lq = (double) cur[j].logit / T - logZ; // log q_j
+        const double q  = std::exp(lq);
+        H  -= q * lq;
+        sq += q * lq * lq;
+        if (cur[j].id == delivered) dlq = lq;
+    }
+    return { dlq, H, std::max(sq - H * H, 0.0) };
+}
+
 std::string safe_json_to_str(const json & data) {
     return data.dump(-1, ' ', false, json::error_handler_t::replace);
 }

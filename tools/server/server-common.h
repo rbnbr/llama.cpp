@@ -328,6 +328,20 @@ json format_response_rerank(
 
 std::vector<llama_token_data> get_token_probabilities(llama_context * ctx, int idx, size_t n_top);
 
+// Honest-sampling statistics for one delivered token under a RequestPin's
+// temperature/top_k/top_p (ADR-0075, TokAgora fork). Computed from the full
+// per-position logit distribution the teacher-forced scorer already holds (the
+// `cur` vector from get_token_probabilities): log q_i(delivered), the step entropy
+// H_i, and the surprise varentropy v_i — the ingredients of the platform's
+// two-sided honest-likelihood verdict. No distribution ever leaves the engine;
+// only these three scalars are attached to the prompt_logprobs entry. A delivered
+// token outside the top_k/top_p support returns logprob == HONEST_OUTSIDE_SUPPORT,
+// a JSON-safe sentinel the client maps to -inf.
+constexpr double HONEST_OUTSIDE_SUPPORT = -1e30;
+struct honest_stats { double logprob; double entropy; double varentropy; };
+honest_stats compute_honest_stats(std::vector<llama_token_data> cur,
+                                   llama_token delivered, float temp, int32_t top_k, float top_p);
+
 std::string safe_json_to_str(const json & data);
 
 std::string tokens_to_str(llama_context * ctx, const llama_tokens & tokens);
